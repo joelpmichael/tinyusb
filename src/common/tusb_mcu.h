@@ -438,9 +438,15 @@
 
 #elif TU_CHECK_MCU(OPT_MCU_CH32V20X)
   // v20x support both FSDEV (USBD) and USBFS, default to FSDEV
+  // only USBFS supports host mode, always select it for host function
   #define TUP_USBIP_WCH_USBFS
   #define TUP_USBIP_FSDEV
   #define TUP_USBIP_FSDEV_CH32
+
+  #if defined(CFG_TUH_ENABLED) && CFG_TUH_ENABLED
+    #define CFG_TUD_WCH_USBIP_USBFS 0
+    #define CFG_TUH_WCH_USBIP_USBFS 1
+  #endif
 
   #if !defined(CFG_TUD_WCH_USBIP_USBFS)
   #define CFG_TUD_WCH_USBIP_USBFS 0

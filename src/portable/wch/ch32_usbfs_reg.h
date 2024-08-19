@@ -136,6 +136,7 @@
 
 // INT_ST
 #define USBFS_INT_ST_MASK_UIS_ENDP(x)  (((x) >> 0) & 0x0F)
+#define USBFS_INT_ST_MASK_UIS_H_RES(x) (((x) >> 0) & 0x0F)
 #define USBFS_INT_ST_MASK_UIS_TOKEN(x) (((x) >> 4) & 0x03)
 
 // UDEV_CTRL
@@ -145,6 +146,14 @@
 #define USBFS_UDEV_CTRL_DM_PIN    (1 << 4)
 #define USBFS_UDEV_CTRL_DP_PIN    (1 << 5)
 #define USBFS_UDEV_CTRL_PD_DIS    (1 << 7)
+
+// UHOST_CTRL
+#define USBFS_UHOST_CTRL_PORT_EN (1 << 0)
+#define USBFS_UHOST_CTRL_BUS_RESET (1 << 1)
+#define USBFS_UHOST_CTRL_LOW_SPEED (1 << 2)
+#define USBFS_UHOST_CTRL_DM_PIN (1 << 4)
+#define USBFS_UHOST_CTRL_DP_PIN (1 << 5)
+#define USBFS_UHOST_CTRL_PD_DIS (1 << 7)
 
 // TX_CTRL
 #define USBFS_EP_T_RES_MASK (3 << 0)
@@ -165,6 +174,36 @@
 #define USBFS_EP_R_RES_NYET  (1 << 0)
 #define USBFS_EP_R_RES_NAK   (2 << 0)
 #define USBFS_EP_R_RES_STALL (3 << 0)
+
+// host EP_MOD
+#define USBFS_UH_EP_TX_EN (1 << 6)
+#define USBFS_UH_EP_TBUF_MOD (1 << 4)
+#define USBFS_UH_EP_RX_EN (1 << 3)
+#define USBFS_UH_EP_RBUF_MOD (1 << 0)
+
+// host SETUP configuration
+#define USBFS_UH_PRE_PID_EN (1 << 10)
+#define USBFS_UH_SOF_EN (1 << 2)
+
+// host TX_CTRL
+#define USBFS_UH_T_AUTO_TOG (1 << 3)
+#define USBFS_UH_T_TOG (1 << 2)
+#define USBFS_UH_T_RES (1 << 0)
+
+// host RX_CTRL
+#define USBFS_UH_R_AUTO_TOG (1 << 3)
+#define USBFS_UH_R_TOG (1 << 2)
+#define USBFS_UH_R_RES (1 << 0)
+
+// status register (mostly for host mode)
+#define USBFS_UMS_SOF_PRES (1 << 7)
+#define USBFS_UMS_SOF_ACT (1 << 6)
+#define USBFS_UMS_SIE_FREE (1 << 5)
+#define USBFS_UMS_R_FIFO_RDY (1 << 4)
+#define USBFS_UMS_BUS_RESET (1 << 3)
+#define USBFS_UMS_SUSPEND (1 << 2)
+#define USBFS_UMS_DM_LEVEL (1 << 1)
+#define USBFS_UMS_DEV_ATTACH (1 << 0)
 
 // token PID
 #define PID_OUT   0

@@ -127,6 +127,7 @@ function(family_configure_example TARGET RTOS)
 
   target_sources(${TARGET}-tinyusb PUBLIC
     ${TOP}/src/portable/wch/dcd_ch32_usbfs.c
+    ${TOP}/src/portable/wch/hcd_ch32_usbfs.c
     ${TOP}/src/portable/st/stm32_fsdev/dcd_stm32_fsdev.c
     )
   target_link_libraries(${TARGET}-tinyusb PUBLIC board_${BOARD})

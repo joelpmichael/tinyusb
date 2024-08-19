@@ -25,15 +25,19 @@
 // USBFS
 __attribute__((interrupt)) __attribute__((used))
 void USBHD_IRQHandler(void) {
-  #if CFG_TUD_WCH_USBIP_USBFS
-  tud_int_handler(0);
+#if defined(CFG_TUH_WCH_USBIP_USBFS)
+  tuh_int_handler(BOARD_TUH_RHPORT, true);
+#elif CFG_TUD_WCH_USBIP_USBFS
+  tud_int_handler(BOARD_TUD_RHPORT);
   #endif
 }
 
 __attribute__((interrupt)) __attribute__((used))
 void USBHDWakeUp_IRQHandler(void) {
-  #if CFG_TUD_WCH_USBIP_USBFS
-  tud_int_handler(0);
+#if defined(CFG_TUH_WCH_USBIP_USBFS)
+  tuh_int_handler(BOARD_TUH_RHPORT, true);
+#elif CFG_TUD_WCH_USBIP_USBFS
+  tud_int_handler(BOARD_TUD_RHPORT);
   #endif
 }
 
@@ -41,14 +45,14 @@ void USBHDWakeUp_IRQHandler(void) {
 __attribute__((interrupt)) __attribute__((used))
 void USB_LP_CAN1_RX0_IRQHandler(void) {
   #if CFG_TUD_WCH_USBIP_FSDEV
-  tud_int_handler(0);
+  tud_int_handler(BOARD_TUD_RHPORT);
   #endif
 }
 
 __attribute__((interrupt)) __attribute__((used))
 void USB_HP_CAN1_TX_IRQHandler(void) {
   #if CFG_TUD_WCH_USBIP_FSDEV
-  tud_int_handler(0);
+  tud_int_handler(BOARD_TUD_RHPORT);
   #endif
 
 }
@@ -56,7 +60,7 @@ void USB_HP_CAN1_TX_IRQHandler(void) {
 __attribute__((interrupt)) __attribute__((used))
 void USBWakeUp_IRQHandler(void) {
   #if CFG_TUD_WCH_USBIP_FSDEV
-  tud_int_handler(0);
+  tud_int_handler(BOARD_TUD_RHPORT);
   #endif
 }
 
