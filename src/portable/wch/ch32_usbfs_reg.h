@@ -135,7 +135,8 @@
 #define USBFS_INT_FG_IS_NAK   (1 << 7)
 
 // INT_ST
-#define USBFS_INT_ST_MASK_UIS_ENDP(x)  (((x) >> 0) & 0x0F)
+#define USBFS_INT_ST_TOG_OK (1 << 6)
+#define USBFS_INT_ST_MASK_UIS_ENDP(x) (((x) >> 0) & 0x0F)
 #define USBFS_INT_ST_MASK_UIS_H_RES(x) (((x) >> 0) & 0x0F)
 #define USBFS_INT_ST_MASK_UIS_TOKEN(x) (((x) >> 4) & 0x03)
 
@@ -211,4 +212,21 @@
 #define PID_IN    2
 #define PID_SETUP 3
 
-#endif // USB_CH32_USBFS_REG_H
+// host tokens, from USB specification
+// left-shift by 4 bits for direct use
+#define HOST_TOKEN_MASK 0xF0
+#define HOST_PID_MASK 0x0F
+#define HOST_TOKEN_OUT (0b0001 << 4)
+#define HOST_TOKEN_IN (0b1001 << 4)
+#define HOST_TOKEN_SOF (0b0101 << 4)
+#define HOST_TOKEN_SETUP (0b1101 << 4)
+#define HOST_PID_DATA0 0b0011
+#define HOST_PID_DATA1 0b1011
+#define HOST_PID_ACK 0b0010
+#define HOST_PID_NAK 0b1010
+#define HOST_PID_STALL 0b1110
+#define HOST_PID_NYET 0b0110
+#define HOST_PID_PRE 0b1100
+#define HOST_PID_ERR 0b1100
+
+#endif// USB_CH32_USBFS_REG_H
