@@ -1,7 +1,7 @@
 /*
  * The MIT License (MIT)
  *
- * Copyright (c) 2020, Ha Thach (tinyusb.org)
+ * Copyright (c) 2024, Brent Kowal (Analog Devices, Inc)
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,26 +27,30 @@
 #ifndef BOARD_H_
 #define BOARD_H_
 
+#include "gpio.h"
+#include "mxc_sys.h"
+
 #ifdef __cplusplus
- extern "C" {
+extern "C" {
 #endif
 
-#define _PINNUM(port, pin)    ((port)*32 + (pin))
-
 // LED
-#define LED_PIN               _PINNUM(0, 23)
-#define LED_STATE_ON          0
+#define LED_PORT        MXC_GPIO0
+#define LED_PIN         MXC_GPIO_PIN_14
+#define LED_VDDIO       MXC_GPIO_VSSEL_VDDIOH
+#define LED_STATE_ON    0
 
 // Button
-#define BUTTON_PIN            _PINNUM(0, 18)
-#define BUTTON_STATE_ACTIVE   0
+#define BUTTON_PORT         MXC_GPIO4
+#define BUTTON_PIN          MXC_GPIO_PIN_0
+#define BUTTON_PULL         MXC_GPIO_PAD_PULL_UP
+#define BUTTON_STATE_ACTIVE 0
 
-// UART
-#define UART_RX_PIN           2
-#define UART_TX_PIN           3
+// UART Enable for EvKit's Integrated FTDI Adapter. Pin Mux handled by the HAL
+#define UART_NUM 2
 
 #ifdef __cplusplus
- }
+}
 #endif
 
 #endif /* BOARD_H_ */
