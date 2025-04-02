@@ -556,9 +556,9 @@ static void process_pipe_rx(uint8_t rhport, uint_fast8_t pipenum)
  * Host API
  *------------------------------------------------------------------*/
 
-bool hcd_init(uint8_t rhport)
-{
-  (void)rhport;
+bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
+  (void) rhport;
+  (void) rh_init;
 
   NVIC_ClearPendingIRQ(USB0_IRQn);
   _hcd.bmRequestType = REQUEST_TYPE_INVALID;
@@ -802,6 +802,11 @@ bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const 
     USB0->RXFIFOSZ  = size_in_log2_minus3;
   }
   return true;
+}
+
+bool hcd_edpt_close(uint8_t rhport, uint8_t daddr, uint8_t ep_addr) {
+  (void) rhport; (void) daddr; (void) ep_addr;
+  return false; // TODO not implemented yet
 }
 
 bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *buffer, uint16_t buflen)
