@@ -497,9 +497,28 @@
 
 #elif TU_CHECK_MCU(OPT_MCU_CH32V20X)
   // v20x support both FSDEV (USBD) and USBFS, default to FSDEV
+  // USB host only available on USBFS, will error if trying to use USBFS for device as well
   #define TUP_USBIP_WCH_USBFS
   #define TUP_USBIP_FSDEV
   #define TUP_USBIP_FSDEV_CH32
+
+  #if defined(CFG_TUH_ENABLED)
+    #if defined(CFG_TUD_ENABLED) && defined(CFG_TUD_WCH_USBIP_USBFS)
+      #error Unable to use WCH USBFS device for both host and device
+    #endif
+    #if defined(CFG_TUH_WCH_USBIP_USBFS)
+      #undef CFG_TUH_WCH_USBIP_USBFS
+    #endif
+    #define CFG_TUH_WCH_USBIP_USBFS 1
+    #if defined(CFG_TUD_WCH_USBIP_USBFS)
+      #undef CFG_TUD_WCH_USBIP_USBFS
+    #endif
+    #define CFG_TUD_WCH_USBIP_USBFS 0
+    #if defined(BOARD_TUH_RHPORT)
+      #undef BOARD_TUH_RHPORT
+    #endif
+    #define BOARD_TUH_RHPORT 1
+  #endif
 
   #if !defined(CFG_TUD_WCH_USBIP_USBFS)
   #define CFG_TUD_WCH_USBIP_USBFS 0

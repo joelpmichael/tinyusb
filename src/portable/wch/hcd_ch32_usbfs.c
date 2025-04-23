@@ -1,0 +1,674 @@
+/*
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2025 Joel Michael <joelpmichael@gmail.com>
+ * Derived from hcd_template.c Copyright (c) 2023 Ha Thach (tinyusb.org)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ *
+ * This file is part of the TinyUSB stack.
+ */
+
+#include "tusb_option.h"
+
+#if CFG_TUH_ENABLED && defined(TUP_USBIP_WCH_USBFS) && CFG_TUH_WCH_USBIP_USBFS
+
+  #include "ch32_usbfs_reg.h"
+  #include "host/hcd.h"
+
+// from tusb.h
+void tusb_time_delay_ms_api(uint32_t ms);
+
+// from debug.h
+void Delay_Us(uint32_t n);
+
+// private variables
+CFG_TUH_MEM_ALIGN static uint8_t USBFS_RX_Buf[MAX_PACKET_SIZE];
+CFG_TUH_MEM_ALIGN static uint8_t USBFS_TX_Buf[MAX_PACKET_SIZE];
+
+volatile uint16_t retransmit_count = 0;
+
+typedef struct usb_device_map_s {
+  volatile bool tx_data1[16];
+  volatile bool rx_data1[16];
+  uint16_t max_packet_size[16];
+  uint8_t devaddr;
+  uint8_t *p_buffer;
+  size_t buff_size;
+  volatile size_t buff_pos;
+} usb_device_map_t;
+
+usb_device_map_t usb_device_map[128] = {
+    {
+        .tx_data1 = {false},
+        .rx_data1 = {false},
+        .max_packet_size = {0},
+        .devaddr = 0,
+        .p_buffer = NULL,
+        .buff_size = 0,
+        .buff_pos = 0,
+    },
+};
+
+volatile uint32_t frame_count = 0;
+volatile bool sof_passed = true;
+
+static hcd_event_t irq_event;
+
+// private helper functions
+  #define barf()       \
+    TU_LOG_LOCATION(); \
+    ch32_usbfs_barf();
+
+void ch32_usbfs_barf(void) {
+  TU_LOG_HEX(3, USBFSH->BASE_CTRL);
+  if (USBFSH->BASE_CTRL & (1 << 7)) { TU_LOG(3, "RB_UC_HOST_MODE\r\n"); }
+  if (USBFSH->BASE_CTRL & (1 << 6)) { TU_LOG(3, "RB_UC_LOW_SPEED\r\n"); }
+  if ((USBFSH->BASE_CTRL & (0b11 << 4)) == (0b00 << 4)) { TU_LOG(3, "DM/DP Normal\r\n"); }
+  if ((USBFSH->BASE_CTRL & (0b11 << 4)) == (0b01 << 4)) { TU_LOG(3, "DM/DP Force SE0\r\n"); }
+  if ((USBFSH->BASE_CTRL & (0b11 << 4)) == (0b10 << 4)) { TU_LOG(3, "DM/DP Force J\r\n"); }
+  if ((USBFSH->BASE_CTRL & (0b11 << 4)) == (0b11 << 4)) { TU_LOG(3, "DM/DP Force K (wakeup)\r\n"); }
+  if (USBFSH->BASE_CTRL & (1 << 3)) { TU_LOG(3, "RB_UC_INT_BUSY\r\n"); }
+  if (USBFSH->BASE_CTRL & (1 << 2)) { TU_LOG(3, "RB_UC_RESET_SIE\r\n"); }
+  if (USBFSH->BASE_CTRL & (1 << 1)) { TU_LOG(3, "RB_UC_CLR_ALL\r\n"); }
+  if (USBFSH->BASE_CTRL & (1 << 0)) { TU_LOG(3, "RB_UC_DMA_EN\r\n"); }
+
+  TU_LOG_HEX(3, USBFSH->HOST_CTRL);
+  if (USBFSH->HOST_CTRL & (1 << 7)) { TU_LOG(3, "RB_UH_PD_DIS \r\n"); }
+  if (USBFSH->HOST_CTRL & (1 << 5)) { TU_LOG(3, "RB_UH_DP_PIN\r\n"); }
+  if (USBFSH->HOST_CTRL & (1 << 4)) { TU_LOG(3, "RB_UH_DM_PIN\r\n"); }
+  if (USBFSH->HOST_CTRL & (1 << 2)) { TU_LOG(3, "RB_UH_LOW_SPEED\r\n"); }
+  if (USBFSH->HOST_CTRL & (1 << 1)) { TU_LOG(3, "RB_UH_BUS_RESET\r\n"); }
+  if (USBFSH->HOST_CTRL & (1 << 0)) { TU_LOG(3, "RB_UH_PORT_EN\r\n"); }
+
+  TU_LOG_HEX(1, USBFSH->MIS_ST);
+  if (USBFSH->MIS_ST & (1 << 7)) { TU_LOG(3, "RB_UMS_SOF_PRES\r\n"); }
+  if (USBFSH->MIS_ST & (1 << 6)) { TU_LOG(3, "RB_UMS_SOF_ACT\r\n"); }
+  if (USBFSH->MIS_ST & (1 << 5)) { TU_LOG(3, "RB_UMS_SIE_FREE\r\n"); }
+  if (USBFSH->MIS_ST & (1 << 4)) { TU_LOG(3, "RB_UMS_R_FIFO_RDY\r\n"); }
+  if (USBFSH->MIS_ST & (1 << 3)) { TU_LOG(3, "RB_UMS_BUS_RESET\r\n"); }
+  if (USBFSH->MIS_ST & (1 << 2)) { TU_LOG(3, "RB_UMS_SUSPEND\r\n"); }
+  if (USBFSH->MIS_ST & (1 << 1)) { TU_LOG(3, "RB_UMS_DM_LEVEL\r\n"); }
+  if (USBFSH->MIS_ST & (1 << 0)) { TU_LOG(3, "RB_UMS_DEV_ATTACH\r\n"); }
+
+  TU_LOG_HEX(3, USBFSH->INT_EN);
+  if (USBFSH->INT_EN & (1 << 6)) { TU_LOG(3, "RB_UIE_DEV_NAK \r\n"); }
+  if (USBFSH->INT_EN & (1 << 5)) { TU_LOG(3, "RB_U_1WIRE_MODE\r\n"); }
+  if (USBFSH->INT_EN & (1 << 4)) { TU_LOG(3, "RB_UIE_FIFO_OV\r\n"); }
+  if (USBFSH->INT_EN & (1 << 3)) { TU_LOG(3, "RB_UIE_HST_SOF\r\n"); }
+  if (USBFSH->INT_EN & (1 << 2)) { TU_LOG(3, "RB_UIE_SUSPEND\r\n"); }
+  if (USBFSH->INT_EN & (1 << 1)) { TU_LOG(3, "RB_UIE_TRANSFER\r\n"); }
+  if (USBFSH->INT_EN & (1 << 0)) { TU_LOG(3, "RB_UIE_DETECT \r\n"); }
+
+  TU_LOG_HEX(1, USBFSH->INT_FG);
+  if (USBFSH->INT_FG & (1 << 7)) { TU_LOG(3, "RB_U_IS_NAK\r\n"); }
+  if (USBFSH->INT_FG & (1 << 6)) { TU_LOG(3, "RB_U_TOG_OK\r\n"); }
+  if (USBFSH->INT_FG & (1 << 5)) { TU_LOG(3, "RB_U_SIE_FREE\r\n"); }
+  if (USBFSH->INT_FG & (1 << 4)) { TU_LOG(3, "RB_UIF_FIFO_OV\r\n"); }
+  if (USBFSH->INT_FG & (1 << 3)) { TU_LOG(3, "RB_UIF_HST_SOF\r\n"); }
+  if (USBFSH->INT_FG & (1 << 2)) { TU_LOG(3, "RB_UIF_SUSPEND\r\n"); }
+  if (USBFSH->INT_FG & (1 << 1)) { TU_LOG(3, "RB_UIF_TRANSFER\r\n"); }
+  if (USBFSH->INT_FG & (1 << 0)) { TU_LOG(3, "RB_UIF_DETECT\r\n"); }
+
+  TU_LOG_HEX(1, USBFSH->INT_ST);
+  if (USBFSH->INT_ST & (1 << 7)) { TU_LOG(3, "RB_UIS_IS_NAK\r\n"); }
+  if (USBFSH->INT_ST & (1 << 6)) { TU_LOG(3, "RB_UIS_TOG_OK\r\n"); }
+  if (USBFSH->INT_ST & (0b11 << 4)) { TU_LOG(3, "UIS_TOKEN=%d\r\n", ((USBFSH->INT_ST & (0b11 << 4)) >> 4)); }
+  if (USBFSH->INT_ST & 0b1111) { TU_LOG(1, "UIS_H_RES=%x\r\n", (USBFSH->INT_ST & 0b1111)); }
+
+  TU_LOG_HEX(3, USBFSH->HOST_EP_MOD);
+  if (USBFSH->HOST_EP_MOD & (1 << 6)) { TU_LOG(3, "RB_UH_EP_TX_EN\r\n"); }
+  if (USBFSH->HOST_EP_MOD & (1 << 4)) { TU_LOG(3, "RB_UH_EP_TBUF_MOD\r\n"); }
+  if (USBFSH->HOST_EP_MOD & (1 << 3)) { TU_LOG(3, "RB_UH_EP_RX_EN\r\n"); }
+  if (USBFSH->HOST_EP_MOD & (1 << 0)) { TU_LOG(3, "RB_UH_EP_RBUF_MOD\r\n"); }
+
+  TU_LOG_HEX(3, USBFSH->HOST_SETUP);
+  if (USBFSH->HOST_SETUP & (1 << 10)) { TU_LOG(3, "RB_UH_PRE_PID_EN\r\n"); }
+  if (USBFSH->HOST_SETUP & (1 << 2)) { TU_LOG(3, "RB_UH_SOF_EN\r\n"); }
+
+  if (USBFSH->DEV_ADDR & (1 << 7)) { TU_LOG(3, "RB_UDA_GP_BIT\r\n"); }
+  TU_LOG(3, "DEV_ADDR=%d\r\n", USBFSH->DEV_ADDR & 0x7F);
+
+  if (USBFSH->HOST_EP_PID & (0b1111 << 4)) { TU_LOG(3, "UH_TOKEN=%x\r\n", (USBFSH->HOST_EP_PID & (0b1111 << 4)) >> 4); }
+  TU_LOG(3, "UH_ENDP=%d\r\n", USBFSH->HOST_EP_PID & 0x0F);
+
+  TU_LOG_HEX(3, USBFSH->HOST_RX_CTRL);
+  if (USBFSH->HOST_RX_CTRL & (1 << 3)) { TU_LOG(3, "RB_UH_R_AUTO_TOG\r\n"); }
+  if (USBFSH->HOST_RX_CTRL & (1 << 2)) { TU_LOG(3, "RB_UH_R_TOG\r\n"); }
+  if (USBFSH->HOST_RX_CTRL & (1 << 0)) { TU_LOG(3, "RB_UH_R_RES\r\n"); }
+  TU_LOG_INT(3, USBFSH->RX_LEN);
+  TU_LOG(3, "HOST_RX_DMA=0x2000%04x\r\n", (uint16_t) USBFSH->HOST_RX_DMA);
+  TU_LOG_HEX(3, USBFS_RX_Buf);
+  TU_LOG_BUF(3, USBFS_RX_Buf, MAX_PACKET_SIZE);
+
+  TU_LOG_HEX(3, USBFSH->HOST_TX_CTRL);
+  if (USBFSH->HOST_TX_CTRL & (1 << 3)) { TU_LOG(3, "RB_UH_T_AUTO_TOG\r\n"); }
+  if (USBFSH->HOST_TX_CTRL & (1 << 2)) { TU_LOG(3, "RB_UH_T_TOG\r\n"); }
+  if (USBFSH->HOST_TX_CTRL & (1 << 0)) { TU_LOG(3, "RB_UH_T_RES\r\n"); }
+  TU_LOG_INT(3, USBFSH->HOST_TX_LEN);
+  TU_LOG(3, "HOST_TX_DMA=0x2000%04x\r\n", (uint16_t) USBFSH->HOST_TX_DMA);
+  TU_LOG_HEX(3, USBFS_TX_Buf);
+  TU_LOG_BUF(3, USBFS_TX_Buf, MAX_PACKET_SIZE);
+}
+
+//--------------------------------------------------------------------+
+// Controller API
+//--------------------------------------------------------------------+
+
+// optional hcd configuration, called by tuh_configure()
+bool hcd_configure(uint8_t rhport, uint32_t cfg_id, const void *cfg_param) {
+  (void) rhport;
+  (void) cfg_id;
+  (void) cfg_param;
+  TU_LOG_LOCATION();
+  TU_LOG(3, "rhport=%d\r\n", rhport);
+  return false;
+}
+
+// Initialize controller to host mode
+bool hcd_init(uint8_t rhport, const tusb_rhport_init_t *rh_init) {
+  (void) rhport;
+  (void) rh_init;
+
+  // init frame count
+  frame_count = 0;
+  hcd_int_disable(rhport);
+
+  // reset SIE
+  USBFSH->BASE_CTRL = USBFS_CTRL_RESET_SIE | USBFS_CTRL_CLR_ALL;
+  // wait for SIE reset
+  tusb_time_delay_ms_api(100);
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  // init host mode
+  USBFSH->BASE_CTRL = USBFS_CTRL_HOST_MODE;
+  tusb_time_delay_ms_api(1);
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  USBFSH->HOST_CTRL = 0;
+  USBFSH->DEV_ADDR = 0;
+  USBFSH->HOST_EP_MOD = USBFS_UH_EP_TX_EN | USBFS_UH_EP_RX_EN;
+  USBFSH->HOST_RX_DMA = (uint32_t) USBFS_RX_Buf;
+  USBFSH->HOST_TX_DMA = (uint32_t) USBFS_TX_Buf;
+  USBFSH->HOST_RX_CTRL = 0;
+  USBFSH->HOST_TX_CTRL = 0;
+  USBFSH->INT_FG = 0xFF;
+  USBFSH->BASE_CTRL = USBFS_CTRL_HOST_MODE | USBFS_CTRL_INT_BUSY | USBFS_CTRL_DMA_EN;
+
+  if (USBFSH->MIS_ST & USBFS_UMS_DEV_ATTACH) {
+    hcd_event_device_attach(rhport, false);
+  }
+
+  hcd_int_enable(rhport);
+  USBFSH->INT_EN = USBFS_INT_EN_HST_SOF | USBFS_INT_EN_TRANSFER | USBFS_INT_EN_DETECT;
+  return true;
+}
+
+// de-init controller
+bool hcd_deinit(uint8_t rhport) {
+  (void) rhport;
+  // reset SIE
+  USBFSH->BASE_CTRL = USBFS_CTRL_RESET_SIE | USBFS_CTRL_CLR_ALL;
+  return true;
+}
+
+// Interrupt Handler
+void hcd_int_handler(uint8_t rhport, bool in_isr) {
+  // busy-wait until next SOF, and SIE is idle.
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SOF_PRES)) {
+  }
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  // process DETECT IRQ
+  if (USBFSH->INT_FG & USBFS_UIF_DETECT) {
+    USBFSH->INT_FG = USBFS_UIF_DETECT;// Clear IRQ flag
+    if (USBFSH->MIS_ST & USBFS_UMS_DEV_ATTACH) {
+      hcd_event_device_attach(rhport, in_isr);
+    } else {
+      hcd_event_device_remove(rhport, in_isr);
+    }
+  }
+
+  // process SOF IRQ
+  if (USBFSH->INT_FG & USBFS_UIF_HST_SOF) {
+    USBFSH->INT_FG = USBFS_UIF_HST_SOF;
+    sof_passed = true;
+    frame_count++;
+  }
+
+  if (USBFSH->INT_FG & USBFS_UIF_TRANSFER) {
+    // finished handling xfer, either as
+    USBFSH->INT_FG = USBFS_UIF_TRANSFER;// Clear IRQ flag
+
+    // USBFS host stops the transfer when USBFSH->HOST_EP_PID is zero
+    uint8_t orig_ep_pid = USBFSH->HOST_EP_PID;
+    USBFSH->HOST_EP_PID = 0x00;// Stop USB transfer
+
+    irq_event.rhport = 1;
+    irq_event.event_id = HCD_EVENT_XFER_COMPLETE;
+    irq_event.dev_addr = USBFSH->DEV_ADDR & USBFS_USB_ADDR_MASK;
+    irq_event.xfer_complete.ep_addr = orig_ep_pid & USBFS_UH_ENDP_MASK;
+
+    if (USBFSH->INT_ST & USBFS_UIS_TOG_OK) {
+      // NOTE: the helper function hcd_event_xfer_complete uses the wrong root port! open-code it here instead...
+      irq_event.xfer_complete.result = XFER_RESULT_SUCCESS;
+
+      if ((orig_ep_pid & USBFS_UH_TOKEN_MASK) == (USB_PID_IN << 4)) {
+        // IN frame
+        irq_event.xfer_complete.len = USBFSH->RX_LEN;
+
+        // copy RX DMA buffer to the destination
+        memcpy(
+            usb_device_map[irq_event.dev_addr].p_buffer + usb_device_map[irq_event.dev_addr].buff_pos,
+            USBFS_RX_Buf,
+            TU_MIN(
+                usb_device_map[irq_event.dev_addr].max_packet_size[irq_event.xfer_complete.ep_addr],
+                TU_MIN(
+                    irq_event.xfer_complete.len,
+                    usb_device_map[irq_event.dev_addr].buff_size - usb_device_map[irq_event.dev_addr].buff_pos)));
+
+        // TinyUSB uses endpoint address with high-bit set to indicate in or out/setup transaction
+
+        // end of data: either a short packet or the buffer is full
+        if (irq_event.xfer_complete.len < usb_device_map[irq_event.dev_addr].max_packet_size[irq_event.xfer_complete.ep_addr] || (usb_device_map[irq_event.dev_addr].buff_pos + irq_event.xfer_complete.len) >= usb_device_map[irq_event.dev_addr].buff_size) {
+          // end of data
+          usb_device_map[irq_event.dev_addr].tx_data1[irq_event.xfer_complete.ep_addr] = usb_device_map[irq_event.dev_addr].rx_data1[irq_event.xfer_complete.ep_addr] = USBFSH->HOST_RX_CTRL & USBFS_UH_R_TOG ? true : false;
+          irq_event.xfer_complete.len += usb_device_map[irq_event.dev_addr].buff_pos;
+          irq_event.xfer_complete.ep_addr |= 0x80;
+
+          hcd_event_handler(&irq_event, in_isr);
+        } else {
+          while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+          }
+          USBFSH->HOST_EP_PID = orig_ep_pid;
+        }
+      } else {
+        if ((orig_ep_pid & USBFS_UH_TOKEN_MASK) == (USB_PID_SETUP << 4)) {
+          // SETUP frame
+        }
+
+        // OUT or SETUP frame
+        irq_event.xfer_complete.len = USBFSH->HOST_TX_LEN;
+
+        // check for more data to tx
+        if (usb_device_map[irq_event.dev_addr].buff_size > (usb_device_map[irq_event.dev_addr].buff_pos + irq_event.xfer_complete.len)) {
+          memcpy(
+              USBFS_TX_Buf,
+              usb_device_map[irq_event.dev_addr].p_buffer + usb_device_map[irq_event.dev_addr].buff_pos + irq_event.xfer_complete.len,
+              TU_MIN(
+                  usb_device_map[irq_event.dev_addr].max_packet_size[irq_event.xfer_complete.ep_addr],
+                  (usb_device_map[irq_event.dev_addr].buff_size - (usb_device_map[irq_event.dev_addr].buff_pos + irq_event.xfer_complete.len))));
+          while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+          }
+          USBFSH->HOST_EP_PID = orig_ep_pid;
+        } else {
+          // end of data
+          usb_device_map[irq_event.dev_addr].tx_data1[irq_event.xfer_complete.ep_addr] = usb_device_map[irq_event.dev_addr].rx_data1[irq_event.xfer_complete.ep_addr] = USBFSH->HOST_TX_CTRL & USBFS_UH_T_TOG ? true : false;
+          irq_event.xfer_complete.len += usb_device_map[irq_event.dev_addr].buff_pos;
+          hcd_event_handler(&irq_event, in_isr);
+        }
+      }
+      usb_device_map[irq_event.dev_addr].buff_pos += irq_event.xfer_complete.len;
+    } else {
+      // data toggle didn't match
+      // probably an error so figure out what happened
+
+      irq_event.xfer_complete.len = 0;
+
+      // TinyUSB uses endpoint address with high-bit set to indicate in or out/setup transaction
+      if ((orig_ep_pid & USBFS_UH_TOKEN_MASK) == (USB_PID_IN << 4)) {
+        irq_event.xfer_complete.ep_addr |= 0x80;
+      }
+
+      switch ((USBFSH->INT_ST & USBFS_UIS_H_RES_MASK)) {
+        case USB_PID_STALL: {
+          irq_event.xfer_complete.result = XFER_RESULT_STALLED;
+          retransmit_count = USBH_MAX_RETRIES;
+          break;
+        }
+        case USB_PID_NAK: {
+          irq_event.xfer_complete.result = XFER_RESULT_FAILED;
+          break;
+        }
+        case USB_PID_NULL: {
+          // TODO - this might need to be XFER_RESULT_FAILED
+          //TU_LOG(1, "WARNING: XFER TIMEOUT - verify TUSB handling of XFER_RESULT_TIMEOUT\r\n");
+          irq_event.xfer_complete.result = XFER_RESULT_TIMEOUT;
+          break;
+        }
+        default: {
+          TU_LOG(1, "FATAL: UNHANDLED XFER ERROR\r\n");
+          barf();
+          do {
+          } while (1);
+        }
+      }
+      if (retransmit_count < USBH_MAX_RETRIES) {
+        retransmit_count++;
+        while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+        }
+        USBFSH->HOST_EP_PID = orig_ep_pid;
+      } else {
+        barf();
+        hcd_event_handler(&irq_event, in_isr);
+      }
+    }
+  }
+}
+
+// Enable USB interrupt
+void hcd_int_enable(uint8_t rhport) {
+  (void) rhport;
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  NVIC_EnableIRQ(USBHD_IRQn);
+}
+
+// Disable USB interrupt
+void hcd_int_disable(uint8_t rhport) {
+  (void) rhport;
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  NVIC_DisableIRQ(USBHD_IRQn);
+}
+
+// Get frame number (1ms)
+uint32_t hcd_frame_number(uint8_t rhport) {
+  (void) rhport;
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+  return frame_count;
+}
+
+//--------------------------------------------------------------------+
+// Port API
+//--------------------------------------------------------------------+
+
+// Get the current connect status of roothub port
+bool hcd_port_connect_status(uint8_t rhport) {
+  (void) rhport;
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  if (USBFSH->MIS_ST & USBFS_UMS_DEV_ATTACH)
+    return true;
+  return false;
+}
+
+// Reset USB bus on the port. Return immediately, bus reset sequence may not be complete.
+// Some port would require hcd_port_reset_end() to be invoked after 10ms to complete the reset sequence.
+void hcd_port_reset(uint8_t rhport) {
+  // disable interrupts, because this will generate another disconnect/connect IRQ
+  // and the disconnect IRQ will end up aborting the enumeration
+
+  // wait for device to settle before resetting
+  tusb_time_delay_ms_api(1000);
+
+  // int_disable implicitly waits for SIE idle
+  hcd_int_disable(rhport);
+
+  // reset device address to 0
+  USBFSH->DEV_ADDR = (USBFSH->DEV_ADDR & USBFS_UDA_GP_BIT) | (0 & USBFS_USB_ADDR_MASK);
+
+  // set full speed mode
+  USBFSH->BASE_CTRL &= ~USBFS_CTRL_LOW_SPEED;
+  USBFSH->HOST_CTRL &= ~USBFS_UH_LOW_SPEED;
+  USBFSH->HOST_SETUP &= ~USBFS_UH_PRE_PID_EN;
+
+  // start bus reset
+  USBFSH->HOST_CTRL |= USBFS_UH_BUS_RESET;
+}
+
+// Complete bus reset sequence
+// TinyUSB inserts a 10-50ms delay in between hcd_port_reset() and hcd_port_reset_end()
+void hcd_port_reset_end(uint8_t rhport) {
+  // end reset
+  USBFSH->HOST_CTRL &= ~USBFS_UH_BUS_RESET;
+  tusb_time_delay_ms_api(10);
+
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  // clear spurious DETECT interrupt
+  if (USBFSH->INT_FG & USBFS_UIF_DETECT) {
+    if (USBFSH->MIS_ST & USBFS_UMS_DEV_ATTACH) {
+      USBFSH->INT_FG = USBFS_UIF_DETECT;
+    }
+  }
+
+  // enable port
+  if (USBFSH->MIS_ST & USBFS_UMS_DEV_ATTACH) {
+    if ((USBFSH->HOST_CTRL & USBFS_UH_PORT_EN) == 0x00) {
+      if ((USBFSH->MIS_ST & USBFS_UMS_DM_LEVEL ? USB_LOW_SPEED : USB_FULL_SPEED) == USB_LOW_SPEED) {
+        USBFSH->BASE_CTRL |= USBFS_UC_LOW_SPEED;
+        USBFSH->HOST_CTRL |= USBFS_UH_LOW_SPEED;
+        USBFSH->HOST_SETUP |= USBFS_UH_PRE_PID_EN;
+      }
+    }
+    USBFSH->HOST_CTRL |= USBFS_UH_PORT_EN;
+    USBFSH->HOST_SETUP |= USBFS_UH_SOF_EN;
+  }
+
+  USBFSH->HOST_RX_DMA = (uint32_t) USBFS_RX_Buf;
+  USBFSH->HOST_TX_DMA = (uint32_t) USBFS_TX_Buf;
+
+  USBFSH->INT_FG = 0xFF;
+  hcd_int_enable(rhport);
+}
+
+// Get port link speed
+tusb_speed_t hcd_port_speed_get(uint8_t rhport) {
+  (void) rhport;
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  if ((USBFSH->HOST_CTRL & USBFS_UH_LOW_SPEED))
+    return TUSB_SPEED_LOW;
+  return TUSB_SPEED_FULL;
+}
+
+// HCD closes all opened endpoints belong to this device
+void hcd_device_close(uint8_t rhport, uint8_t dev_addr) {
+  (void) rhport;
+  (void) dev_addr;
+  for (uint8_t i = 0; i < 16; i++) {
+    hcd_edpt_close(rhport, dev_addr, i);
+  }
+}
+
+//--------------------------------------------------------------------+
+// Endpoints API
+//--------------------------------------------------------------------+
+
+// Open an endpoint
+bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const *ep_desc) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_desc;
+  TU_ASSERT(dev_addr < 128);
+  usb_device_map[dev_addr].max_packet_size[ep_desc->bEndpointAddress & 0x7F] = ep_desc->wMaxPacketSize;
+  return true;
+}
+
+bool hcd_edpt_close(uint8_t rhport, uint8_t daddr, uint8_t ep_addr) {
+  (void) rhport;
+  (void) daddr;
+  (void) ep_addr;
+  TU_ASSERT(daddr < 128);
+  usb_device_map[daddr].max_packet_size[ep_addr] = 0;
+  return true;
+}
+
+// Submit a transfer, when complete hcd_event_xfer_complete() must be invoked
+bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *buffer, uint16_t buflen) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_addr;
+  (void) buffer;
+  (void) buflen;
+  TU_ASSERT(dev_addr < 128);
+  if (usb_device_map[dev_addr].max_packet_size[(ep_addr & 0x7F)] < 8) {
+    TU_LOG_LOCATION();
+    TU_LOG(2, "max_packet_size too small, reset to 8\r\n");
+    usb_device_map[dev_addr].max_packet_size[(ep_addr & 0x7F)] = 8;
+  }
+
+  TU_LOG(3, "rhport=%d dev_addr=%d ep_addr=%d buflen=%d\r\n", rhport, dev_addr, ep_addr, buflen);
+
+  retransmit_count = 0;
+  usb_device_map[dev_addr].p_buffer = buffer;
+  usb_device_map[dev_addr].buff_size = buflen;
+  usb_device_map[dev_addr].buff_pos = 0;
+
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SOF_PRES)) {
+  }
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  // make sure host is idle until we set up
+  USBFSH->HOST_EP_PID = 0;
+
+
+  USBFSH->HOST_RX_DMA = (uint32_t) USBFS_RX_Buf;
+  USBFSH->HOST_TX_DMA = (uint32_t) USBFS_TX_Buf;
+
+  if (ep_addr & 0x80) {
+    // DATA IN (RX)
+    // TinyUSB uses the high-bit (0x80) in the ep_addr to select IN or OUT xfer
+    ep_addr &= 0x7F;
+
+    USBFSH->DEV_ADDR = (USBFSH->DEV_ADDR & USBFS_UDA_GP_BIT) | (dev_addr & USBFS_USB_ADDR_MASK);
+
+    USBFSH->HOST_TX_LEN = USBFSH->RX_LEN = 0;
+    USBFSH->HOST_TX_CTRL = USBFSH->HOST_RX_CTRL = USBFS_UH_T_AUTO_TOG | USBFS_UH_R_AUTO_TOG | (usb_device_map[dev_addr].rx_data1[ep_addr] << 2);
+    USBFSH->INT_FG = 0xFF;// clear any pending interrupt flags
+    sof_passed = false;
+    // USBFS host starts the transfer when USBFSH->HOST_EP_PID is non-zero
+    USBFSH->HOST_EP_PID = (USB_PID_IN << 4) | (ep_addr & USBFS_UH_ENDP_MASK);// start transfer
+  } else {
+    // DATA OUT (TX)
+    USBFSH->DEV_ADDR = (USBFSH->DEV_ADDR & USBFS_UDA_GP_BIT) | (dev_addr & USBFS_USB_ADDR_MASK);
+
+    // copy to TX buffer
+    memcpy(USBFS_TX_Buf, buffer, TU_MIN(TU_MIN(buflen, MAX_PACKET_SIZE), usb_device_map[dev_addr].max_packet_size[ep_addr]));
+
+    USBFSH->HOST_TX_LEN = TU_MIN(TU_MIN(buflen, MAX_PACKET_SIZE), usb_device_map[dev_addr].max_packet_size[ep_addr]);
+    USBFSH->HOST_TX_CTRL = USBFSH->HOST_RX_CTRL = USBFS_UH_T_AUTO_TOG | USBFS_UH_R_AUTO_TOG | (usb_device_map[dev_addr].tx_data1[ep_addr] << 2);
+
+    USBFSH->INT_FG = 0xFF;// clear any pending interrupt flags
+    // USBFS host starts the transfer when USBFSH->HOST_EP_PID is non-zero
+    sof_passed = false;
+    USBFSH->HOST_EP_PID = (USB_PID_OUT << 4) | (ep_addr & USBFS_UH_ENDP_MASK);// start transfer
+  }
+
+  return true;
+}
+
+// Abort a queued transfer. Note: it can only abort transfer that has not been started
+// Return true if a queued transfer is aborted, false if there is no transfer to abort
+bool hcd_edpt_abort_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_addr;
+  TU_LOG_LOCATION();
+  TU_LOG(3, "rhport=%d\r\n", rhport);
+
+  // stop xmit
+  USBFSH->HOST_EP_PID = 0;
+
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  return true;
+}
+
+// Submit a special transfer to send 8-byte Setup Packet, when complete hcd_event_xfer_complete() must be invoked
+bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet[8]) {
+  // no need for special length handling because this will always be inside the max packet size
+  #define SETUP_PACKET_LEN 8
+  #if MAX_PACKET_SIZE < SETUP_PACKET_LEN
+    #error MAX_PACKET_SIZE smaller than SETUP_PACKET_LEN
+  #endif
+  (void) rhport;
+  (void) dev_addr;
+  (void) setup_packet;
+  TU_ASSERT(dev_addr < 128);
+  if (usb_device_map[dev_addr].max_packet_size[0] < 8) {
+    TU_LOG_LOCATION();
+    TU_LOG(2, "max_packet_size too small, reset to 8\r\n");
+    usb_device_map[dev_addr].max_packet_size[0] = 8;
+  }
+
+  retransmit_count = 0;
+  usb_device_map[dev_addr].p_buffer = NULL;
+  usb_device_map[dev_addr].buff_size = SETUP_PACKET_LEN;
+  usb_device_map[dev_addr].buff_pos = 0;
+  usb_device_map[dev_addr].tx_data1[0] = false;
+  usb_device_map[dev_addr].rx_data1[0] = false;
+
+  memcpy(USBFS_TX_Buf, setup_packet, 8);
+
+  // busy-wait until SIE is idle
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SOF_PRES)) {
+  }
+  while (!(USBFSH->MIS_ST & USBFS_UMS_SIE_FREE)) {
+  }
+
+  // make sure host is idle until we set up
+  USBFSH->HOST_EP_PID = 0;
+
+  USBFSH->DEV_ADDR = (USBFSH->DEV_ADDR & USBFS_UDA_GP_BIT) | (dev_addr & USBFS_USB_ADDR_MASK);
+
+  USBFSH->HOST_TX_LEN = USBFSH->RX_LEN = 0;
+
+  USBFSH->HOST_TX_LEN = 8;
+  USBFSH->HOST_TX_CTRL = USBFSH->HOST_RX_CTRL = USBFS_UH_T_AUTO_TOG | USBFS_UH_R_AUTO_TOG;
+  USBFSH->INT_FG = 0xFF;// clear any pending interrupt flags
+  sof_passed = false;
+  // USBFS host starts the transfer when USBFSH->HOST_EP_PID is non-zero
+  USBFSH->HOST_EP_PID = (USB_PID_SETUP << 4);// start transfer
+
+  return true;
+}
+
+// clear stall, data toggle is also reset to DATA0
+bool hcd_edpt_clear_stall(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_addr;
+  TU_LOG_LOCATION();
+  TU_LOG(3, "rhport=%d\r\n", rhport);
+  barf();
+  return false;
+}
+
+#endif

@@ -5,7 +5,10 @@
 #CROSS_COMPILE ?= riscv-nuclei-elf-
 
 # Toolchain from https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack
-CROSS_COMPILE ?= riscv-none-elf-
+#CROSS_COMPILE ?= riscv-none-elf-
+
+# Toolchain included in MRS
+CROSS_COMPILE ?= riscv-wch-elf-
 
 CH32_FAMILY = ch32v20x
 SDK_DIR = hw/mcu/wch/ch32v20x
@@ -43,6 +46,7 @@ LD_FILE = $(FAMILY_PATH)/linker/${CH32_FAMILY}.ld
 
 SRC_C += \
 	src/portable/wch/dcd_ch32_usbfs.c \
+	src/portable/wch/hcd_ch32_usbfs.c \
 	src/portable/st/stm32_fsdev/dcd_stm32_fsdev.c \
 	$(SDK_SRC_DIR)/Core/core_riscv.c \
 	$(SDK_SRC_DIR)/Peripheral/src/${CH32_FAMILY}_gpio.c \
